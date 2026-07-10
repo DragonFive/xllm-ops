@@ -26,7 +26,32 @@ constexpr int32_t kRecConstrainedTopKExpBlockElements = 128;
 constexpr int32_t kRecConstrainedTopKExpBufferBytes =
     kRecConstrainedTopKExpBlockElements *
     static_cast<int32_t>(sizeof(float));
-constexpr int32_t kRecConstrainedTopKLoadBf16Elements = 16;
+constexpr int32_t kRecConstrainedTopKSortBlockElements = 2048;
+constexpr int32_t kRecConstrainedTopKSortThreshold = 512;
+constexpr int32_t kRecConstrainedTopKSortPairBufferBytes =
+    kRecConstrainedTopKSortBlockElements * 2 *
+    static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKSortIndexBufferBytes =
+    kRecConstrainedTopKSortBlockElements *
+    static_cast<int32_t>(sizeof(int32_t));
+constexpr int32_t kRecConstrainedTopKSortTmpBufferBytes =
+    kRecConstrainedTopKSortBlockElements * 3 *
+    static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKFloatElementsPerBlock =
+    32 / static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKFloatElementsPerRepeat =
+    256 / static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKReduceTmpElements =
+    (((kRecConstrainedTopKExpBlockElements +
+       kRecConstrainedTopKFloatElementsPerRepeat - 1) /
+          kRecConstrainedTopKFloatElementsPerRepeat +
+      kRecConstrainedTopKFloatElementsPerBlock - 1) /
+     kRecConstrainedTopKFloatElementsPerBlock) *
+    kRecConstrainedTopKFloatElementsPerBlock;
+constexpr int32_t kRecConstrainedTopKReduceTmpBufferBytes =
+    kRecConstrainedTopKReduceTmpElements *
+    static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKLoadBf16Elements = 64;
 constexpr int32_t kRecConstrainedTopKLoadBf16BufferBytes =
     kRecConstrainedTopKLoadBf16Elements * static_cast<int32_t>(sizeof(bfloat16_t));
 constexpr int32_t kRecConstrainedTopKLoadFloatBufferBytes =
@@ -35,6 +60,10 @@ constexpr int32_t kRecConstrainedTopKOutputTokenBufferBytes =
     kRecConstrainedTopKMaxK * static_cast<int32_t>(sizeof(int32_t));
 constexpr int32_t kRecConstrainedTopKOutputLogprobBufferBytes =
     kRecConstrainedTopKMaxK * static_cast<int32_t>(sizeof(float));
+
+__aicore__ inline int32_t RecConstrainedTopKAlign32(int32_t value) {
+  return ((value + 31) / 32) * 32;
+}
 
 template <typename LogitType>
 class RecConstrainedTopKKernel {
@@ -53,19 +82,30 @@ class RecConstrainedTopKKernel {
                               GM_ADDR out_tokens,
                               GM_ADDR out_logprobs,
                               const RecConstrainedTopKTilingData*
-                                  tiling_data) {
+                                  tiling_data,
+                              AscendC::TPipe* pipe) {
     tiling_data_ = *tiling_data;
-    pipe_.InitBuffer(math_buf_, kRecConstrainedTopKMathBufferBytes);
-    pipe_.InitBuffer(exp_buf_, kRecConstrainedTopKExpBufferBytes);
-    pipe_.InitBuffer(logit_bf16_buf_, kRecConstrainedTopKLoadBf16BufferBytes);
-    pipe_.InitBuffer(logit_float_buf_, kRecConstrainedTopKLoadFloatBufferBytes);
-    pipe_.InitBuffer(candidate_logit_buf_,
-                     static_cast<uint32_t>(tiling_data_.max_candidate_count *
-                                           static_cast<int32_t>(sizeof(float))));
-    pipe_.InitBuffer(output_token_buf_,
-                     kRecConstrainedTopKOutputTokenBufferBytes);
-    pipe_.InitBuffer(output_logprob_buf_,
-                     kRecConstrainedTopKOutputLogprobBufferBytes);
+    pipe_ = pipe;
+    pipe_->InitBuffer(math_buf_, kRecConstrainedTopKMathBufferBytes);
+    pipe_->InitBuffer(exp_buf_, kRecConstrainedTopKExpBufferBytes);
+    pipe_->InitBuffer(reduce_tmp_buf_,
+                      kRecConstrainedTopKReduceTmpBufferBytes);
+    pipe_->InitBuffer(logit_bf16_buf_, kRecConstrainedTopKLoadBf16BufferBytes);
+    pipe_->InitBuffer(logit_float_buf_, kRecConstrainedTopKLoadFloatBufferBytes);
+    pipe_->InitBuffer(
+        candidate_logit_buf_,
+        static_cast<uint32_t>(RecConstrainedTopKAlign32(
+                                  tiling_data_.max_candidate_count) *
+                              static_cast<int32_t>(sizeof(float))));
+    pipe_->InitBuffer(sort_pair_buf_,
+                      kRecConstrainedTopKSortPairBufferBytes);
+    pipe_->InitBuffer(sort_index_buf_,
+                      kRecConstrainedTopKSortIndexBufferBytes);
+    pipe_->InitBuffer(sort_tmp_buf_, kRecConstrainedTopKSortTmpBufferBytes);
+    pipe_->InitBuffer(output_token_buf_,
+                      kRecConstrainedTopKOutputTokenBufferBytes);
+    pipe_->InitBuffer(output_logprob_buf_,
+                      kRecConstrainedTopKOutputLogprobBufferBytes);
     logits_gm_.SetGlobalBuffer(reinterpret_cast<__gm__ LogitType*>(logits));
     sequence_group_gm_.SetGlobalBuffer(
         reinterpret_cast<__gm__ int32_t*>(sequence_group));
@@ -189,15 +229,40 @@ class RecConstrainedTopKKernel {
     AscendC::SetFlag<AscendC::HardEvent::S_V>(ev_s_v_f);
     AscendC::WaitFlag<AscendC::HardEvent::S_V>(ev_s_v_f);
     AscendC::Exp(exp_values, exp_values, exp_count);
-    // Vector Exp finished writing UBUF. Add a V_S sync before the scalar loop
-    // below reads the results via GetValue.
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::LocalTensor<float> reduce_sum = math_buf_.Get<float>();
+    AscendC::LocalTensor<float> reduce_tmp = reduce_tmp_buf_.Get<float>();
+    AscendC::ReduceSum(reduce_sum, exp_values, reduce_tmp, exp_count);
+    AscendC::PipeBarrier<PIPE_V>();
+    // ReduceSum writes UBUF through the vector unit. Synchronize before the
+    // scalar unit reads the reduced value.
     event_t ev_v_s_f = static_cast<event_t>(
         GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
     AscendC::SetFlag<AscendC::HardEvent::V_S>(ev_v_s_f);
     AscendC::WaitFlag<AscendC::HardEvent::V_S>(ev_v_s_f);
+    return reduce_sum.GetValue(0);
+  }
+
+  __aicore__ inline float SumExpFromCandidateLogits(
+      AscendC::LocalTensor<float>& candidate_logits,
+      int32_t degree,
+      float max_value) {
     float sum_exp = 0.0f;
-    for (int32_t idx = 0; idx < exp_count; ++idx) {
-      sum_exp += exp_values.GetValue(idx);
+    AscendC::LocalTensor<float> exp_values =
+        exp_buf_.Get<float>(kRecConstrainedTopKExpBlockElements);
+    for (int32_t offset = 0; offset < degree;
+         offset += kRecConstrainedTopKExpBlockElements) {
+      const int32_t remaining = degree - offset;
+      const int32_t exp_count =
+          remaining < kRecConstrainedTopKExpBlockElements
+              ? remaining
+              : kRecConstrainedTopKExpBlockElements;
+      AscendC::Adds(exp_values,
+                    candidate_logits[offset],
+                    -max_value,
+                    exp_count);
+      AscendC::PipeBarrier<PIPE_V>();
+      sum_exp += FlushExpBlock(exp_values, exp_count);
     }
     return sum_exp;
   }
@@ -412,6 +477,108 @@ class RecConstrainedTopKKernel {
     }
   }
 
+  __aicore__ inline void MergeSortedBlockTopK(
+      AscendC::LocalTensor<float>& sorted_values,
+      AscendC::LocalTensor<int32_t>& sorted_candidate_indices,
+      int32_t sorted_count,
+      int32_t begin,
+      int32_t degree,
+      int32_t table_kind,
+      float* top_values,
+      int32_t* top_tokens,
+      int32_t& filled_topk_count,
+      bool& top_values_are_heap) const {
+    for (int32_t idx = 0; idx < sorted_count; ++idx) {
+      const float value = sorted_values.GetValue(idx);
+      if (value <= -1.0e19f) {
+        continue;
+      }
+      if (top_values_are_heap && filled_topk_count == tiling_data_.top_k &&
+          value <= top_values[0]) {
+        return;
+      }
+      const int32_t candidate_index = sorted_candidate_indices.GetValue(idx);
+      if (candidate_index < 0 || candidate_index >= degree) {
+        continue;
+      }
+      const int32_t token =
+          ReadCandidateToken(table_kind, begin + candidate_index);
+      if (filled_topk_count < tiling_data_.top_k) {
+        top_values[filled_topk_count] = value;
+        top_tokens[filled_topk_count] = token;
+        ++filled_topk_count;
+        if (filled_topk_count == tiling_data_.top_k) {
+          BuildMinHeap(top_values, top_tokens, filled_topk_count);
+          top_values_are_heap = true;
+        }
+      } else {
+        ReplaceMinHeapRoot(
+            value, token, top_values, top_tokens, filled_topk_count);
+      }
+    }
+  }
+
+  __aicore__ inline void SelectTopKWithBlockSort(
+      AscendC::LocalTensor<float>& candidate_logits,
+      int32_t begin,
+      int32_t degree,
+      int32_t table_kind,
+      float* top_values,
+      int32_t* top_tokens,
+      int32_t& filled_topk_count,
+      bool& top_values_are_heap) {
+    AscendC::LocalTensor<float> sort_pairs =
+        sort_pair_buf_.Get<float>(kRecConstrainedTopKSortBlockElements * 2);
+    AscendC::LocalTensor<int32_t> sort_indices =
+        sort_index_buf_.Get<int32_t>(kRecConstrainedTopKSortBlockElements);
+    AscendC::LocalTensor<uint32_t> sort_indices_u32 =
+        sort_indices.ReinterpretCast<uint32_t>();
+    AscendC::LocalTensor<float> sort_tmp =
+        sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements * 3);
+    AscendC::LocalTensor<float> sorted_values =
+        sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements);
+
+    for (int32_t offset = 0; offset < degree;
+         offset += kRecConstrainedTopKSortBlockElements) {
+      const int32_t remaining = degree - offset;
+      const int32_t actual_count =
+          remaining < kRecConstrainedTopKSortBlockElements
+              ? remaining
+              : kRecConstrainedTopKSortBlockElements;
+      const int32_t aligned_count = RecConstrainedTopKAlign32(actual_count);
+      for (int32_t pad = actual_count; pad < aligned_count; ++pad) {
+        candidate_logits.SetValue(offset + pad,
+                                  kRecConstrainedTopKInvalidLogProb);
+      }
+
+      AscendC::CreateVecIndex<int32_t>(
+          sort_indices, static_cast<int32_t>(offset), aligned_count);
+      AscendC::PipeBarrier<PIPE_V>();
+      AscendC::Sort<float, true>(sort_pairs,
+                                 candidate_logits[offset],
+                                 sort_indices_u32,
+                                 sort_tmp,
+                                 aligned_count / 32);
+      AscendC::PipeBarrier<PIPE_V>();
+      AscendC::Extract(
+          sorted_values, sort_indices_u32, sort_pairs, aligned_count / 32);
+      AscendC::PipeBarrier<PIPE_V>();
+
+      const int32_t sorted_count =
+          actual_count < tiling_data_.top_k ? actual_count : tiling_data_.top_k;
+      MergeSortedBlockTopK(sorted_values,
+                           sort_indices,
+                           sorted_count,
+                           begin,
+                           degree,
+                           table_kind,
+                           top_values,
+                           top_tokens,
+                           filled_topk_count,
+                           top_values_are_heap);
+    }
+  }
+
   __aicore__ inline void ProcessRow(int32_t row) {
     int32_t begin = 0;
     int32_t degree = 0;
@@ -434,31 +601,8 @@ class RecConstrainedTopKKernel {
     AscendC::LocalTensor<float> cached_logit_float =
         logit_float_buf_.Get<float>(kRecConstrainedTopKLoadBf16Elements);
     AscendC::LocalTensor<float> candidate_logits =
-        candidate_logit_buf_.Get<float>(tiling_data_.max_candidate_count);
-
-    float max_value = -3.4028234663852886e38f;
-    for (int32_t idx = 0; idx < degree; ++idx) {
-      const int32_t token = ReadCandidateToken(table_kind, begin + idx);
-      if (token < 0 || token >= tiling_data_.vocab_size) {
-        candidate_logits.SetValue(idx, kRecConstrainedTopKInvalidLogProb);
-        continue;
-      }
-      const float value = ReadLogit(row,
-                                    token,
-                                    cached_block_offset,
-                                    cached_logit_bf16,
-                                    cached_logit_float) /
-                          temperature;
-      candidate_logits.SetValue(idx, value);
-      if (value > max_value) {
-        max_value = value;
-      }
-    }
-
-    if (max_value < -3.0e38f) {
-      WriteInvalidRow(row, table_kind);
-      return;
-    }
+        candidate_logit_buf_.Get<float>(
+            RecConstrainedTopKAlign32(tiling_data_.max_candidate_count));
 
     float top_values[kRecConstrainedTopKMaxK];
     int32_t top_tokens[kRecConstrainedTopKMaxK];
@@ -468,46 +612,78 @@ class RecConstrainedTopKKernel {
       top_tokens[idx] = default_token;
     }
     int32_t filled_topk_count = 0;
+    bool top_values_are_heap = false;
+    const bool no_candidate_prune_needed = degree <= tiling_data_.top_k;
+    const bool use_block_sort_topk =
+        degree > tiling_data_.top_k &&
+        degree >= kRecConstrainedTopKSortThreshold;
 
-    float sum_exp = 0.0f;
-    int32_t exp_count = 0;
-    AscendC::LocalTensor<float> exp_values =
-        exp_buf_.Get<float>(kRecConstrainedTopKExpBlockElements);
+    float max_value = -3.4028234663852886e38f;
     for (int32_t idx = 0; idx < degree; ++idx) {
       const int32_t token = ReadCandidateToken(table_kind, begin + idx);
       if (token < 0 || token >= tiling_data_.vocab_size) {
+        candidate_logits.SetValue(idx, kRecConstrainedTopKInvalidLogProb);
         continue;
       }
-      const float value = candidate_logits.GetValue(idx);
-      exp_values.SetValue(exp_count, value - max_value);
-      ++exp_count;
-      if (exp_count == kRecConstrainedTopKExpBlockElements) {
-        sum_exp += FlushExpBlock(exp_values, exp_count);
-        exp_count = 0;
+      const float logit = ReadLogit(row,
+                                    token,
+                                    cached_block_offset,
+                                    cached_logit_bf16,
+                                    cached_logit_float);
+      const float value = logit / temperature;
+      candidate_logits.SetValue(idx, value);
+      if (value > max_value) {
+        max_value = value;
       }
-      if (filled_topk_count < tiling_data_.top_k) {
+      if (use_block_sort_topk) {
+        continue;
+      }
+      if (no_candidate_prune_needed) {
+        top_values[filled_topk_count] = value;
+        top_tokens[filled_topk_count] = token;
+        ++filled_topk_count;
+      } else if (filled_topk_count < tiling_data_.top_k) {
         top_values[filled_topk_count] = value;
         top_tokens[filled_topk_count] = token;
         ++filled_topk_count;
         if (filled_topk_count == tiling_data_.top_k) {
           BuildMinHeap(top_values, top_tokens, filled_topk_count);
+          top_values_are_heap = true;
         }
       } else {
         ReplaceMinHeapRoot(
             value, token, top_values, top_tokens, filled_topk_count);
       }
     }
-    sum_exp += FlushExpBlock(exp_values, exp_count);
+
+    if (max_value < -3.0e38f) {
+      WriteInvalidRow(row, table_kind);
+      return;
+    }
+
+    const float sum_exp =
+        SumExpFromCandidateLogits(candidate_logits, degree, max_value);
 
     if (sum_exp <= 0.0f) {
       WriteInvalidRow(row, table_kind);
       return;
     }
 
-    if (filled_topk_count == tiling_data_.top_k) {
-      SortMinHeapDescending(top_values, top_tokens, filled_topk_count);
-    } else {
+    if (use_block_sort_topk) {
+      SelectTopKWithBlockSort(candidate_logits,
+                              begin,
+                              degree,
+                              table_kind,
+                              top_values,
+                              top_tokens,
+                              filled_topk_count,
+                              top_values_are_heap);
+    }
+    if (filled_topk_count > 1 && !top_values_are_heap) {
       BuildMinHeap(top_values, top_tokens, filled_topk_count);
+      top_values_are_heap = true;
+    }
+    if (top_values_are_heap) {
       SortMinHeapDescending(top_values, top_tokens, filled_topk_count);
     }
     const float log_denom = LnScalar(sum_exp) + max_value;
@@ -528,12 +704,16 @@ class RecConstrainedTopKKernel {
   }
 
   RecConstrainedTopKTilingData tiling_data_;
-  AscendC::TPipe pipe_;
+  AscendC::TPipe* pipe_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> math_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> exp_buf_;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> reduce_tmp_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> logit_bf16_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> logit_float_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> candidate_logit_buf_;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> sort_pair_buf_;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> sort_index_buf_;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> sort_tmp_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> output_token_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> output_logprob_buf_;
   AscendC::GlobalTensor<LogitType> logits_gm_;

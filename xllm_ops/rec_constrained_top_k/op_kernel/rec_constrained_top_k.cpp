@@ -19,6 +19,7 @@ using namespace AscendC;
 
 #define INVOKE_REC_CONSTRAINED_TOPK_IMPL(LogitType)                         \
   do {                                                                       \
+    AscendC::TPipe pipe;                                                     \
     kernels::RecConstrainedTopKKernel<LogitType> op;                         \
     op.Init(logits,                                                           \
             sequence_group,                                                   \
@@ -31,7 +32,8 @@ using namespace AscendC;
             temperatures,                                                     \
             out_tokens,                                                       \
             out_logprobs,                                                     \
-            &tiling_data);                                                    \
+            &tiling_data,                                                     \
+            &pipe);                                                           \
     op.Process();                                                             \
   } while (0)
 
