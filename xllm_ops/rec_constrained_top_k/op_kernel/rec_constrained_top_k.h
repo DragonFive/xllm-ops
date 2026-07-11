@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace kernels {
 
-constexpr int32_t kRecConstrainedTopKMaxK = 256;
+constexpr int32_t kRecConstrainedTopKMaxK = 512;
 constexpr float kRecConstrainedTopKInvalidLogProb = -1.0e20f;
 constexpr int32_t kRecConstrainedTopKMathBufferBytes = 32;
 constexpr int32_t kRecConstrainedTopKExpBlockElements = 128;

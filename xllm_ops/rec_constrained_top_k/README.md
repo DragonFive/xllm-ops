@@ -14,6 +14,7 @@ benchmark, and msprof gates pass.
 Supported contract:
 
 - `current_step` in `{0, 1, 2}`;
+- `top_k <= 512`;
 - `logits` dtype `float16`, `bfloat16`, or `float32`;
 - constraint tables use `int32`, with `prefix1_pair_keys` as `int64`;
 - output tokens are `int32`, output logprobs are `float32`;

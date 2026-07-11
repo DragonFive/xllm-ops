@@ -76,6 +76,21 @@ def _build_tables():
     }
 
 
+def _build_wide_step0_tables(vocab_size=768, candidate_count=640):
+    first_token_ids = torch.arange(candidate_count, dtype=torch.int32)
+    return {
+        "vocab_size": vocab_size,
+        "first_token_ids": first_token_ids,
+        "prefix1_offsets": torch.zeros([vocab_size + 1], dtype=torch.int32),
+        "prefix1_values": torch.tensor([0], dtype=torch.int32),
+        "prefix1_pair_keys": torch.tensor([0], dtype=torch.int64),
+        "prefix2_value_offsets": torch.tensor([0, 0], dtype=torch.int32),
+        "prefix2_values": torch.tensor([0], dtype=torch.int32),
+        "max_prefix1_degree": 1,
+        "max_prefix2_degree": 1,
+    }
+
+
 def _allowed_tokens(row, current_step, sequence_group, tables):
     if current_step == 0:
         return tables["first_token_ids"].to(torch.long)
@@ -283,6 +298,48 @@ def test_rec_constrained_topk_aligned_large_topk_npu():
         npu_tables["prefix2_values"],
         temperatures.npu(),
         2,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    assert torch.equal(out_tokens.cpu(), expected_tokens)
+    assert torch.allclose(out_logprobs.cpu(), expected_logprobs, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("top_k", [384, 512])
+@pytest.mark.parametrize("temperature_mode", ["scalar", "row"])
+def test_rec_constrained_topk_maxk512_step0_blocksort_npu(top_k, temperature_mode):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    tables = _build_wide_step0_tables()
+    rows = 2
+    torch.manual_seed(20260710 + top_k)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    if temperature_mode == "scalar":
+        temperatures = torch.tensor([0.75], dtype=torch.float32)
+    else:
+        temperatures = torch.tensor([0.7, 1.3], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits, sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
         top_k,
         tables["max_prefix1_degree"],
         tables["max_prefix2_degree"],
