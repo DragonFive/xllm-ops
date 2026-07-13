@@ -150,6 +150,12 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   tiling.set_used_core_num(used_core_num);
   tiling.set_debug_mode(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", 0));
+  tiling.set_p11_mode(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", 0));
+  tiling.set_enable_contiguous_scan(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_CONTIGUOUS_SCAN", 0));
+  tiling.set_enable_vector_final_sort(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_VECTOR_FINAL_SORT", 0));
 
   context->SetBlockDim(used_core_num);
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),

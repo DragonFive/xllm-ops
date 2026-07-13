@@ -349,6 +349,218 @@ def test_rec_constrained_topk_maxk512_step0_blocksort_npu(top_k, temperature_mod
     assert torch.allclose(out_logprobs.cpu(), expected_logprobs, atol=1e-4, rtol=1e-4)
 
 
+@pytest.mark.parametrize("contiguous_scan_mode", [1, 2])
+def test_rec_constrained_topk_contiguous_scan_env_npu(monkeypatch, contiguous_scan_mode):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv(
+        "XLLM_REC_CONSTRAINED_TOPK_CONTIGUOUS_SCAN", str(contiguous_scan_mode)
+    )
+
+    tables = _build_wide_step0_tables(vocab_size=1024, candidate_count=641)
+    rows = 2
+    top_k = 512
+    torch.manual_seed(20260712)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    logits += torch.arange(tables["vocab_size"], dtype=torch.float32).view(1, -1) * 0.02
+    logits_bf16 = logits.to(torch.bfloat16)
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    temperatures = torch.tensor([0.75, 1.25], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits_bf16.float(), sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits_bf16.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    actual_tokens = out_tokens.cpu()
+    actual_logprobs = out_logprobs.cpu()
+    assert torch.allclose(
+        torch.sort(actual_logprobs, dim=1, descending=True).values,
+        torch.sort(expected_logprobs, dim=1, descending=True).values,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+    allowed = tables["first_token_ids"].to(torch.long)
+    for row in range(rows):
+        temp = temperatures[row]
+        candidate_logits = logits_bf16.float()[row, allowed] / temp
+        candidate_logprobs = torch.log_softmax(candidate_logits, dim=0)
+        expected_by_token = {
+            int(token.item()): float(logprob.item())
+            for token, logprob in zip(allowed, candidate_logprobs)
+        }
+        for idx in range(top_k):
+            token = int(actual_tokens[row, idx].item())
+            assert token in expected_by_token
+            assert actual_logprobs[row, idx].item() == pytest.approx(
+                expected_by_token[token], abs=1e-4
+            )
+
+
+def test_rec_constrained_topk_vector_final_sort_env_npu(monkeypatch):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_VECTOR_FINAL_SORT", "1")
+
+    tables = _build_wide_step0_tables(vocab_size=1024, candidate_count=641)
+    rows = 2
+    top_k = 512
+    torch.manual_seed(20260713)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    logits += torch.arange(tables["vocab_size"], dtype=torch.float32).view(1, -1) * 0.01
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    temperatures = torch.tensor([0.75, 1.25], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits, sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    assert torch.equal(out_tokens.cpu(), expected_tokens)
+    assert torch.allclose(out_logprobs.cpu(), expected_logprobs, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("p11_mode", [2, 4])
+def test_rec_constrained_topk_p11_token_staging_env_npu(monkeypatch, p11_mode):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", str(p11_mode))
+
+    tables = _build_wide_step0_tables(vocab_size=1024, candidate_count=641)
+    rows = 2
+    top_k = 512
+    torch.manual_seed(20260714)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    logits += torch.arange(tables["vocab_size"], dtype=torch.float32).view(1, -1) * 0.01
+    logits_bf16 = logits.to(torch.bfloat16)
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    temperatures = torch.tensor([0.75, 1.25], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits_bf16.float(), sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits_bf16.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    actual_tokens = out_tokens.cpu()
+    actual_logprobs = out_logprobs.cpu()
+    assert torch.allclose(
+        torch.sort(actual_logprobs, dim=1, descending=True).values,
+        torch.sort(expected_logprobs, dim=1, descending=True).values,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+    allowed = tables["first_token_ids"].to(torch.long)
+    for row in range(rows):
+        temp = temperatures[row]
+        candidate_logits = logits_bf16.float()[row, allowed] / temp
+        candidate_logprobs = torch.log_softmax(candidate_logits, dim=0)
+        expected_by_token = {
+            int(token.item()): float(logprob.item())
+            for token, logprob in zip(allowed, candidate_logprobs)
+        }
+        for idx in range(top_k):
+            token = int(actual_tokens[row, idx].item())
+            assert token in expected_by_token
+            assert actual_logprobs[row, idx].item() == pytest.approx(
+                expected_by_token[token], abs=1e-4
+            )
+
+
+def test_rec_constrained_topk_p11_ordered_topk_env_npu(monkeypatch):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", "3")
+
+    tables = _build_wide_step0_tables(vocab_size=1024, candidate_count=641)
+    rows = 2
+    top_k = 512
+    torch.manual_seed(20260715)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    logits += torch.arange(tables["vocab_size"], dtype=torch.float32).view(1, -1) * 0.01
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    temperatures = torch.tensor([0.75, 1.25], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits, sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    assert torch.equal(out_tokens.cpu(), expected_tokens)
+    assert torch.allclose(out_logprobs.cpu(), expected_logprobs, atol=1e-4, rtol=1e-4)
+
+
 def test_rec_constrained_topk_small_topk_uses_single_core_debug_npu(monkeypatch):
     try:
         device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
@@ -425,3 +637,58 @@ def test_rec_constrained_topk_aligned_topk_multicore_debug_npu(monkeypatch):
     ).view(rows, 1).repeat(1, top_k)
     assert torch.equal(out_tokens.cpu(), expected_tokens)
     assert torch.equal(out_logprobs.cpu(), expected_logprobs)
+
+
+def test_rec_constrained_topk_stage_attribution_debug_npu(monkeypatch):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", "2")
+
+    tables = _build_tables()
+    rows = 2
+    top_k = 32
+    torch.manual_seed(20260711)
+    logits = torch.randn([rows, tables["vocab_size"]], dtype=torch.float32)
+    sequence_group = torch.zeros([rows, 3], dtype=torch.int32)
+    temperatures = torch.ones([1], dtype=torch.float32)
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    diag_tokens = out_tokens.cpu()
+    diag_timings = out_logprobs.cpu()
+    assert torch.equal(diag_tokens[:, 0], torch.full([rows], 20260711, dtype=torch.int32))
+    assert torch.equal(diag_tokens[:, 1], torch.arange(rows, dtype=torch.int32))
+    assert torch.equal(diag_tokens[:, 2], torch.zeros([rows], dtype=torch.int32))
+    assert torch.equal(diag_tokens[:, 3], torch.zeros([rows], dtype=torch.int32))
+    assert torch.equal(
+        diag_tokens[:, 4],
+        torch.full([rows], tables["first_token_ids"].numel(), dtype=torch.int32),
+    )
+    assert torch.equal(diag_tokens[:, 5], torch.full([rows], top_k, dtype=torch.int32))
+    assert torch.equal(diag_tokens[:, 6], torch.zeros([rows], dtype=torch.int32))
+    assert torch.all(diag_tokens[:, 7] >= 0)
+    assert torch.all(diag_tokens[:, 8] >= 1)
+    assert torch.equal(
+        diag_tokens[:, 9],
+        torch.full([rows], tables["first_token_ids"].numel(), dtype=torch.int32),
+    )
+    assert torch.equal(diag_timings[:, 10], torch.zeros([rows], dtype=torch.float32))
+    assert torch.all(diag_timings[:, :19] >= 0)
