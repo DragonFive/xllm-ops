@@ -69,8 +69,7 @@ int32_t get_env_int(const char* name, int32_t default_value) {
 namespace optiling {
 
 static ge::graphStatus TilingFunc(gert::TilingContext* context) {
-  auto platform =
-      platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+  auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
   const uint32_t core_num = platform.GetCoreNumAiv();
 
   const gert::StorageShape* logits_shape = context->GetInputShape(LOGITS);
@@ -87,25 +86,21 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
       static_cast<int32_t>(logits_shape->GetStorageShape().GetDim(0));
   const int32_t vocab_size =
       static_cast<int32_t>(logits_shape->GetStorageShape().GetDim(1));
-  const int32_t current_step =
-      static_cast<int32_t>(*context->GetAttrs()->GetAttrPointer<int>(
-          CURRENT_STEP));
+  const int32_t current_step = static_cast<int32_t>(
+      *context->GetAttrs()->GetAttrPointer<int>(CURRENT_STEP));
   const int32_t top_k =
       static_cast<int32_t>(*context->GetAttrs()->GetAttrPointer<int>(TOP_K));
-  const int32_t max_prefix1_degree =
-      static_cast<int32_t>(*context->GetAttrs()->GetAttrPointer<int>(
-          MAX_PREFIX1_DEGREE));
-  const int32_t max_prefix2_degree =
-      static_cast<int32_t>(*context->GetAttrs()->GetAttrPointer<int>(
-          MAX_PREFIX2_DEGREE));
+  const int32_t max_prefix1_degree = static_cast<int32_t>(
+      *context->GetAttrs()->GetAttrPointer<int>(MAX_PREFIX1_DEGREE));
+  const int32_t max_prefix2_degree = static_cast<int32_t>(
+      *context->GetAttrs()->GetAttrPointer<int>(MAX_PREFIX2_DEGREE));
 
   int32_t sequence_stride = kDefaultSequenceStride;
   if (sequence_shape != nullptr) {
     const gert::Shape& storage_shape = sequence_shape->GetStorageShape();
     const size_t dim_num = storage_shape.GetDimNum();
     if (dim_num > 0) {
-      sequence_stride =
-          static_cast<int32_t>(storage_shape.GetDim(dim_num - 1));
+      sequence_stride = static_cast<int32_t>(storage_shape.GetDim(dim_num - 1));
     }
   }
 
@@ -128,8 +123,8 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   tiling.set_prefix1_pair_count(
       static_cast<int32_t>(prefix1_pair_shape->GetStorageShape().GetDim(0)));
   tiling.set_temperature_count(temperature_count);
-  int32_t max_candidate_count = static_cast<int32_t>(
-      first_token_shape->GetStorageShape().GetDim(0));
+  int32_t max_candidate_count =
+      static_cast<int32_t>(first_token_shape->GetStorageShape().GetDim(0));
   if (current_step == 1) {
     max_candidate_count = max_prefix1_degree;
   } else if (current_step >= 2) {
@@ -145,17 +140,24 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   const int32_t requested_core_num =
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_FORCE_CORES", default_core_num);
   const int32_t used_core_num =
-      row_write_aligned ? std::max(1, std::min(requested_core_num, max_core_num))
+      row_write_aligned
+          ? std::max(1, std::min(requested_core_num, max_core_num))
                         : 1;
   tiling.set_used_core_num(used_core_num);
-  tiling.set_debug_mode(
-      get_env_int("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", 0));
-  tiling.set_p11_mode(
-      get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", 0));
+  tiling.set_debug_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", 0));
+  tiling.set_p11_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", 0));
   tiling.set_enable_contiguous_scan(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_CONTIGUOUS_SCAN", 0));
   tiling.set_enable_vector_final_sort(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_VECTOR_FINAL_SORT", 0));
+  int32_t load_bf16_mode =
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_LOAD_MODE", 0);
+  if (load_bf16_mode == 4 && top_k != 384) {
+    load_bf16_mode = 0;
+  }
+  tiling.set_load_bf16_mode(load_bf16_mode);
+  tiling.set_streaming_mode(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", 0));
 
   context->SetBlockDim(used_core_num);
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),
@@ -165,7 +167,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
 }
 
 // --------------------------Tiling函数及TilingPrepare函数注册--------
-IMPL_OP_OPTILING(RecConstrainedTopK)
-    .Tiling(TilingFunc);
+IMPL_OP_OPTILING(RecConstrainedTopK).Tiling(TilingFunc);
 
 }  // namespace optiling

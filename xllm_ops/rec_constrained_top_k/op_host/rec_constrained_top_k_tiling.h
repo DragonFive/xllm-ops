@@ -34,6 +34,8 @@ BEGIN_TILING_DATA_DEF(RecConstrainedTopKTilingData)
   TILING_DATA_FIELD_DEF(int32_t, p11_mode);
   TILING_DATA_FIELD_DEF(int32_t, enable_contiguous_scan);
   TILING_DATA_FIELD_DEF(int32_t, enable_vector_final_sort);
+  TILING_DATA_FIELD_DEF(int32_t, load_bf16_mode);
+TILING_DATA_FIELD_DEF(int32_t, streaming_mode);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(RecConstrainedTopK, RecConstrainedTopKTilingData)
