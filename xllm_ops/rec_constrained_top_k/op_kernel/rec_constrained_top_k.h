@@ -32,6 +32,11 @@ constexpr int32_t kRecConstrainedTopKSortPairBufferElements =
 constexpr int32_t kRecConstrainedTopKSortPairBufferBytes =
     kRecConstrainedTopKSortPairBufferElements *
     static_cast<int32_t>(sizeof(float));
+constexpr int32_t kRecConstrainedTopKGlobalPairBufferElements =
+    kRecConstrainedTopKMaxK * 4;
+constexpr int32_t kRecConstrainedTopKGlobalPairBufferBytes =
+    kRecConstrainedTopKGlobalPairBufferElements *
+    static_cast<int32_t>(sizeof(float));
 constexpr int32_t kRecConstrainedTopKSortIndexBufferBytes =
     kRecConstrainedTopKSortBlockElements *
     static_cast<int32_t>(sizeof(int32_t));
@@ -138,6 +143,10 @@ class RecConstrainedTopKKernel {
         static_cast<uint32_t>(CandidateLogitBufferElements() *
                               static_cast<int32_t>(sizeof(float))));
     pipe_->InitBuffer(sort_pair_buf_, kRecConstrainedTopKSortPairBufferBytes);
+    if (tiling_data_.p19_mode == 1) {
+      pipe_->InitBuffer(global_pair_buf_,
+                        kRecConstrainedTopKGlobalPairBufferBytes);
+    }
     pipe_->InitBuffer(sort_index_buf_, kRecConstrainedTopKSortIndexBufferBytes);
     pipe_->InitBuffer(sort_tmp_buf_, kRecConstrainedTopKSortTmpBufferBytes);
     pipe_->InitBuffer(output_token_buf_,
@@ -228,6 +237,9 @@ class RecConstrainedTopKKernel {
     int64_t stream_block_merge_us = 0;
     int64_t stream_token_prefetch_issue_us = 0;
     int64_t stream_token_prefetch_wait_us = 0;
+    int64_t pair_payload_prepare_us = 0;
+    int64_t vector_pair_merge_us = 0;
+    int64_t final_pair_extract_us = 0;
   };
 
   __aicore__ inline float ReadLogit(
@@ -280,43 +292,43 @@ class RecConstrainedTopKKernel {
       AscendC::LocalTensor<float>& cached_logit_float) {
     const int32_t block_offset = token / LoadElements * LoadElements;
     const int32_t max_block_offset = tiling_data_.vocab_size - LoadElements;
-      const int32_t safe_block_offset =
-          max_block_offset > 0 && block_offset > max_block_offset
-              ? max_block_offset
-              : block_offset;
-      const int32_t local_offset = token - safe_block_offset;
-      const int32_t copy_len =
+    const int32_t safe_block_offset =
+        max_block_offset > 0 && block_offset > max_block_offset
+            ? max_block_offset
+            : block_offset;
+    const int32_t local_offset = token - safe_block_offset;
+    const int32_t copy_len =
         tiling_data_.vocab_size - safe_block_offset < LoadElements
-              ? tiling_data_.vocab_size - safe_block_offset
+            ? tiling_data_.vocab_size - safe_block_offset
             : LoadElements;
-      if (cached_block_offset != safe_block_offset) {
-        cached_block_offset = safe_block_offset;
-        AscendC::DataCopyExtParams copy_params;
-        copy_params.blockCount = 1;
-        copy_params.blockLen = static_cast<uint32_t>(
-            copy_len * static_cast<int32_t>(sizeof(bfloat16_t)));
-        copy_params.srcStride = 0;
-        copy_params.dstStride = 0;
-        copy_params.rsv = 0;
-        AscendC::DataCopyPadExtParams<bfloat16_t> pad_params{false, 0, 0, 0};
-        AscendC::DataCopyPad(
-            cached_logit_bf16,
-            logits_gm_[static_cast<int64_t>(row) * tiling_data_.vocab_size +
-                       safe_block_offset],
-            copy_params,
-            pad_params);
-        event_t event_mte2_v = static_cast<event_t>(
-            GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_mte2_v);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_mte2_v);
-        AscendC::Cast(cached_logit_float,
-                      cached_logit_bf16,
-                      AscendC::RoundMode::CAST_NONE,
-                      copy_len);
-        AscendC::PipeBarrier<PIPE_V>();
-      }
-      return cached_logit_float.GetValue(local_offset);
+    if (cached_block_offset != safe_block_offset) {
+      cached_block_offset = safe_block_offset;
+      AscendC::DataCopyExtParams copy_params;
+      copy_params.blockCount = 1;
+      copy_params.blockLen = static_cast<uint32_t>(
+          copy_len * static_cast<int32_t>(sizeof(bfloat16_t)));
+      copy_params.srcStride = 0;
+      copy_params.dstStride = 0;
+      copy_params.rsv = 0;
+      AscendC::DataCopyPadExtParams<bfloat16_t> pad_params{false, 0, 0, 0};
+      AscendC::DataCopyPad(
+          cached_logit_bf16,
+          logits_gm_[static_cast<int64_t>(row) * tiling_data_.vocab_size +
+                     safe_block_offset],
+          copy_params,
+          pad_params);
+      event_t event_mte2_v = static_cast<event_t>(
+          GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
+      AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_mte2_v);
+      AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_mte2_v);
+      AscendC::Cast(cached_logit_float,
+                    cached_logit_bf16,
+                    AscendC::RoundMode::CAST_NONE,
+                    copy_len);
+      AscendC::PipeBarrier<PIPE_V>();
     }
+    return cached_logit_float.GetValue(local_offset);
+  }
 
   __aicore__ inline float ReadLogitBf16Dynamic(
       int32_t row,
@@ -424,7 +436,7 @@ class RecConstrainedTopKKernel {
   }
 
   __aicore__ inline float FlushExpBlock(AscendC::LocalTensor<float>& exp_values,
-      int32_t exp_count) {
+                                        int32_t exp_count) {
     if (exp_count <= 0) {
       return 0.0f;
     }
@@ -460,8 +472,8 @@ class RecConstrainedTopKKernel {
          offset += kRecConstrainedTopKExpBlockElements) {
       const int32_t remaining = degree - offset;
       const int32_t exp_count = remaining < kRecConstrainedTopKExpBlockElements
-              ? remaining
-              : kRecConstrainedTopKExpBlockElements;
+                                    ? remaining
+                                    : kRecConstrainedTopKExpBlockElements;
       AscendC::Adds(
           exp_values, candidate_logits[offset], -max_value, exp_count);
       AscendC::PipeBarrier<PIPE_V>();
@@ -831,7 +843,7 @@ class RecConstrainedTopKKernel {
         attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
     AscendC::LocalTensor<float> max_tensor = math_buf_.Get<float>();
     AscendC::LocalTensor<float> reduce_tmp = sort_tmp_buf_.Get<float>(
-            RecConstrainedTopKReduceTmpElementsForCount(degree));
+        RecConstrainedTopKReduceTmpElementsForCount(degree));
     AscendC::ReduceMax(max_tensor, candidate_logits, reduce_tmp, degree);
     AscendC::PipeBarrier<PIPE_V>();
     max_value = max_tensor.GetValue(0);
@@ -850,7 +862,7 @@ class RecConstrainedTopKKernel {
       return prefix1_values_gm_.GetValue(0);
     }
     if (table_kind == 2 && prefix2_value_offsets_gm_.GetValue(
-                                 tiling_data_.prefix1_pair_count) > 0) {
+                               tiling_data_.prefix1_pair_count) > 0) {
       return prefix2_values_gm_.GetValue(0);
     }
     return 0;
@@ -916,16 +928,16 @@ class RecConstrainedTopKKernel {
 
   __aicore__ inline void WriteAttributionRow(
       int32_t row,
-                                             int32_t core_id,
-                                             int32_t core_num,
-                                             int32_t table_kind,
-                                             int32_t degree,
-                                             bool use_block_sort_topk,
-                                             int32_t filled_topk_count,
-                                             bool invalid_row,
-                                             int64_t row_start_us,
-                                             StageAttribution attribution,
-                                             bool used_contiguous_scan = false) {
+      int32_t core_id,
+      int32_t core_num,
+      int32_t table_kind,
+      int32_t degree,
+      bool use_block_sort_topk,
+      int32_t filled_topk_count,
+      bool invalid_row,
+      int64_t row_start_us,
+      StageAttribution attribution,
+      bool used_contiguous_scan = false) {
     if (tiling_data_.top_k <= 0) {
       return;
     }
@@ -956,7 +968,7 @@ class RecConstrainedTopKKernel {
     SetAttributionToken(out_tokens, 13, used_contiguous_scan ? 1 : 0);
     SetAttributionToken(out_tokens, 14, tiling_data_.enable_vector_final_sort);
     SetAttributionToken(out_tokens, 15, tiling_data_.p11_mode);
-    SetAttributionToken(out_tokens, 16, 0);
+    SetAttributionToken(out_tokens, 16, tiling_data_.p19_mode);
     SetAttributionToken(out_tokens, 17, tiling_data_.streaming_mode);
 
     SetAttributionLogprob(
@@ -1006,6 +1018,12 @@ class RecConstrainedTopKKernel {
         out_logprobs, 21, static_cast<float>(attribution.global_sort_us));
     SetAttributionLogprob(
         out_logprobs,
+        22,
+        static_cast<float>(attribution.pair_payload_prepare_us));
+    SetAttributionLogprob(
+        out_logprobs, 23, static_cast<float>(attribution.vector_pair_merge_us));
+    SetAttributionLogprob(
+        out_logprobs,
         24,
         static_cast<float>(attribution.merge_token_lookup_us));
     SetAttributionLogprob(
@@ -1026,6 +1044,10 @@ class RecConstrainedTopKKernel {
         out_logprobs,
         30,
         static_cast<float>(attribution.stream_token_prefetch_wait_us));
+    SetAttributionLogprob(
+        out_logprobs,
+        31,
+        static_cast<float>(attribution.final_pair_extract_us));
 
     const int64_t flush_start_us = RecConstrainedTopKTimestampUs();
     FlushOutputRow(row, out_tokens, out_logprobs);
@@ -1214,11 +1236,11 @@ class RecConstrainedTopKKernel {
       const int32_t token =
           use_prefetched_tokens
               ? ReadPrefetchedMergeCandidateToken(candidate_index,
-                                                   block_offset,
-                                                   block_count,
-                                                   block_tokens,
-                                                   attribution_mode,
-                                                   attribution)
+                                                  block_offset,
+                                                  block_count,
+                                                  block_tokens,
+                                                  attribution_mode,
+                                                  attribution)
               : ReadMergeCandidateToken(table_kind,
                                         begin,
                                         candidate_index,
@@ -1298,11 +1320,11 @@ class RecConstrainedTopKKernel {
         merged_tokens[out_count] =
             use_prefetched_tokens
                 ? ReadPrefetchedMergeCandidateToken(block_candidate_index,
-                                                     block_offset,
-                                                     block_count,
-                                                     block_tokens,
-                                                     attribution_mode,
-                                                     attribution)
+                                                    block_offset,
+                                                    block_count,
+                                                    block_tokens,
+                                                    attribution_mode,
+                                                    attribution)
                 : ReadMergeCandidateToken(table_kind,
                                           begin,
                                           block_candidate_index,
@@ -1323,6 +1345,125 @@ class RecConstrainedTopKKernel {
     }
     filled_topk_count = out_count;
     top_values_are_heap = false;
+  }
+
+  __aicore__ inline void SortAndMergeBlockPairs(
+      AscendC::LocalTensor<float>& candidate_logits,
+      int32_t actual_count,
+      AscendC::LocalTensor<int32_t>& block_tokens,
+      AscendC::LocalTensor<float>& global_pairs,
+      int32_t& global_pair_count,
+      bool attribution_mode,
+      StageAttribution& attribution) {
+    AscendC::LocalTensor<float> block_pairs =
+        sort_pair_buf_.Get<float>(kRecConstrainedTopKSortPairBufferElements);
+    AscendC::LocalTensor<uint32_t> token_payload =
+        block_tokens.ReinterpretCast<uint32_t>();
+    AscendC::LocalTensor<float> sort_tmp =
+        sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements * 3);
+    const int32_t aligned_count = RecConstrainedTopKAlign32(actual_count);
+    for (int32_t pad = actual_count; pad < aligned_count; ++pad) {
+      candidate_logits.SetValue(pad, kRecConstrainedTopKInvalidLogProb);
+      block_tokens.SetValue(pad, 0);
+    }
+
+    const int64_t sort_start_us =
+        attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Sort<float, true>(block_pairs,
+                               candidate_logits,
+                               token_payload,
+                               sort_tmp,
+                               aligned_count / 32);
+    AscendC::PipeBarrier<PIPE_V>();
+    if (attribution_mode) {
+      const int64_t elapsed_us =
+          RecConstrainedTopKTimestampUs() - sort_start_us;
+      attribution.block_sort_us += elapsed_us;
+      attribution.stream_block_sort_us += elapsed_us;
+    }
+
+    const int32_t block_pair_count =
+        actual_count < tiling_data_.top_k ? actual_count : tiling_data_.top_k;
+    if (global_pair_count == 0) {
+      const int64_t prepare_start_us =
+          attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+      AscendC::DataCopy(global_pairs,
+                        block_pairs,
+                        AscendC::GetSortLen<float>(block_pair_count));
+      AscendC::PipeBarrier<PIPE_V>();
+      global_pair_count = block_pair_count;
+      if (attribution_mode) {
+        attribution.pair_payload_prepare_us +=
+            RecConstrainedTopKTimestampUs() - prepare_start_us;
+      }
+      return;
+    }
+
+    AscendC::LocalTensor<float> merged_pairs =
+        sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements * 3);
+    AscendC::MrgSortSrcList<float> sort_list(
+        global_pairs, block_pairs, global_pairs, global_pairs);
+    const uint16_t element_counts[4] = {
+        static_cast<uint16_t>(global_pair_count),
+        static_cast<uint16_t>(block_pair_count),
+        0,
+        0};
+    uint32_t sorted_counts[4] = {0, 0, 0, 0};
+    const int64_t merge_start_us =
+        attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+    AscendC::MrgSort<float, false>(
+        merged_pairs, sort_list, element_counts, sorted_counts, 0b11, 1);
+    AscendC::PipeBarrier<PIPE_V>();
+    global_pair_count = global_pair_count + block_pair_count;
+    if (global_pair_count > tiling_data_.top_k) {
+      global_pair_count = tiling_data_.top_k;
+    }
+    AscendC::DataCopy(global_pairs,
+                      merged_pairs,
+                      AscendC::GetSortLen<float>(global_pair_count));
+    AscendC::PipeBarrier<PIPE_V>();
+    if (attribution_mode) {
+      const int64_t elapsed_us =
+          RecConstrainedTopKTimestampUs() - merge_start_us;
+      attribution.vector_pair_merge_us += elapsed_us;
+      attribution.merge_us += elapsed_us;
+      attribution.stream_block_merge_us += elapsed_us;
+    }
+  }
+
+  __aicore__ inline void ExtractGlobalPairs(
+      AscendC::LocalTensor<float>& global_pairs,
+      int32_t global_pair_count,
+      float* top_values,
+      int32_t* top_tokens,
+      int32_t& filled_topk_count,
+      bool& top_values_are_heap,
+      bool attribution_mode,
+      StageAttribution& attribution) {
+    const int64_t extract_start_us =
+        attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+    AscendC::LocalTensor<float> final_values =
+        sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements);
+    AscendC::LocalTensor<int32_t> final_tokens =
+        sort_index_buf_.Get<int32_t>(kRecConstrainedTopKSortBlockElements);
+    AscendC::LocalTensor<uint32_t> final_tokens_u32 =
+        final_tokens.ReinterpretCast<uint32_t>();
+    AscendC::Extract(final_values,
+                     final_tokens_u32,
+                     global_pairs,
+                     RecConstrainedTopKAlign32(global_pair_count) / 32);
+    AscendC::PipeBarrier<PIPE_V>();
+    for (int32_t idx = 0; idx < global_pair_count; ++idx) {
+      top_values[idx] = final_values.GetValue(idx);
+      top_tokens[idx] = final_tokens.GetValue(idx);
+    }
+    filled_topk_count = global_pair_count;
+    top_values_are_heap = false;
+    if (attribution_mode) {
+      attribution.final_pair_extract_us +=
+          RecConstrainedTopKTimestampUs() - extract_start_us;
+    }
   }
 
   __aicore__ inline void SortAndMergeBlock(
@@ -1353,75 +1494,75 @@ class RecConstrainedTopKKernel {
     AscendC::LocalTensor<float> sorted_values =
         sort_tmp_buf_.Get<float>(kRecConstrainedTopKSortBlockElements);
 
-      const int32_t aligned_count = RecConstrainedTopKAlign32(actual_count);
-      const int64_t block_sort_start_us =
-          attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
-      for (int32_t pad = actual_count; pad < aligned_count; ++pad) {
+    const int32_t aligned_count = RecConstrainedTopKAlign32(actual_count);
+    const int64_t block_sort_start_us =
+        attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+    for (int32_t pad = actual_count; pad < aligned_count; ++pad) {
       candidate_logits.SetValue(score_offset + pad,
-                                  kRecConstrainedTopKInvalidLogProb);
-      }
+                                kRecConstrainedTopKInvalidLogProb);
+    }
 
-      AscendC::CreateVecIndex<int32_t>(
+    AscendC::CreateVecIndex<int32_t>(
         sort_indices, candidate_index_offset, aligned_count);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Sort<float, true>(sort_pairs,
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Sort<float, true>(sort_pairs,
                                candidate_logits[score_offset],
-                                 sort_indices_u32,
-                                 sort_tmp,
-                                 aligned_count / 32);
-      AscendC::PipeBarrier<PIPE_V>();
-      AscendC::Extract(
-          sorted_values, sort_indices_u32, sort_pairs, aligned_count / 32);
-      AscendC::PipeBarrier<PIPE_V>();
-      if (attribution_mode) {
+                               sort_indices_u32,
+                               sort_tmp,
+                               aligned_count / 32);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Extract(
+        sorted_values, sort_indices_u32, sort_pairs, aligned_count / 32);
+    AscendC::PipeBarrier<PIPE_V>();
+    if (attribution_mode) {
       const int64_t elapsed_us =
           RecConstrainedTopKTimestampUs() - block_sort_start_us;
       attribution.block_sort_us += elapsed_us;
       if (streaming_mode) {
         attribution.stream_block_sort_us += elapsed_us;
       }
-      }
+    }
 
-      const int32_t sorted_count =
-          actual_count < tiling_data_.top_k ? actual_count : tiling_data_.top_k;
-      const int64_t merge_start_us =
-          attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
-      if (tiling_data_.p11_mode == 3 || tiling_data_.p11_mode == 4) {
-        MergeSortedBlockTopKOrdered(sorted_values,
-                                    sort_indices,
-                                    sorted_count,
-                                    begin,
-                                    degree,
-                                    table_kind,
-                                    candidate_index_offset,
-                                    actual_count,
-                                    use_prefetched_tokens,
-                                    block_tokens,
-                                    top_values,
-                                    top_tokens,
-                                    filled_topk_count,
-                                    top_values_are_heap,
-                                    attribution_mode,
-                                    attribution);
-      } else {
-        MergeSortedBlockTopK(sorted_values,
-                             sort_indices,
-                             sorted_count,
-                             begin,
-                             degree,
-                             table_kind,
-                             candidate_index_offset,
-                             actual_count,
-                             use_prefetched_tokens,
-                             block_tokens,
-                             top_values,
-                             top_tokens,
-                             filled_topk_count,
-                             top_values_are_heap,
-                             attribution_mode,
-                             attribution);
-      }
-      if (attribution_mode) {
+    const int32_t sorted_count =
+        actual_count < tiling_data_.top_k ? actual_count : tiling_data_.top_k;
+    const int64_t merge_start_us =
+        attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+    if (tiling_data_.p11_mode == 3 || tiling_data_.p11_mode == 4) {
+      MergeSortedBlockTopKOrdered(sorted_values,
+                                  sort_indices,
+                                  sorted_count,
+                                  begin,
+                                  degree,
+                                  table_kind,
+                                  candidate_index_offset,
+                                  actual_count,
+                                  use_prefetched_tokens,
+                                  block_tokens,
+                                  top_values,
+                                  top_tokens,
+                                  filled_topk_count,
+                                  top_values_are_heap,
+                                  attribution_mode,
+                                  attribution);
+    } else {
+      MergeSortedBlockTopK(sorted_values,
+                           sort_indices,
+                           sorted_count,
+                           begin,
+                           degree,
+                           table_kind,
+                           candidate_index_offset,
+                           actual_count,
+                           use_prefetched_tokens,
+                           block_tokens,
+                           top_values,
+                           top_tokens,
+                           filled_topk_count,
+                           top_values_are_heap,
+                           attribution_mode,
+                           attribution);
+    }
+    if (attribution_mode) {
       const int64_t elapsed_us =
           RecConstrainedTopKTimestampUs() - merge_start_us;
       attribution.merge_us += elapsed_us;
@@ -1502,16 +1643,23 @@ class RecConstrainedTopKKernel {
         tiling_data_.streaming_mode == 2 &&
         degree > kRecConstrainedTopKSortBlockElements &&
         (tiling_data_.p11_mode == 3 || tiling_data_.p11_mode == 4);
+    const bool use_pairwise_vector_merge =
+        tiling_data_.p19_mode == 1 && use_block_token_pipeline;
     AscendC::LocalTensor<int32_t> block_token_buffers;
+    AscendC::LocalTensor<float> global_pairs;
+    int32_t global_pair_count = 0;
+    if (use_pairwise_vector_merge) {
+      global_pairs = global_pair_buf_.Get<float>(
+          kRecConstrainedTopKGlobalPairBufferElements);
+    }
     if (use_block_token_pipeline) {
       block_token_buffers = block_token_buf_.Get<int32_t>(
           kRecConstrainedTopKBlockTokenBufferCount *
           kRecConstrainedTopKSortBlockElements);
       AscendC::LocalTensor<int32_t> first_block_tokens = block_token_buffers;
-      const int32_t first_count =
-          degree < kRecConstrainedTopKSortBlockElements
-              ? degree
-              : kRecConstrainedTopKSortBlockElements;
+      const int32_t first_count = degree < kRecConstrainedTopKSortBlockElements
+                                      ? degree
+                                      : kRecConstrainedTopKSortBlockElements;
       PrefetchCandidateTokenBlock(first_block_tokens,
                                   table_kind,
                                   begin,
@@ -1540,9 +1688,8 @@ class RecConstrainedTopKKernel {
                                     kRecConstrainedTopKSortBlockElements]
               : staged_candidate_tokens;
       if (use_block_token_pipeline) {
-        WaitCandidateTokenBlock(block_token_events_[buffer_index],
-                                attribution_mode,
-                                attribution);
+        WaitCandidateTokenBlock(
+            block_token_events_[buffer_index], attribution_mode, attribution);
       }
       const int32_t scan_step =
           use_block_token_pipeline ? actual_count : staged_scan_step;
@@ -1572,7 +1719,7 @@ class RecConstrainedTopKKernel {
           const int32_t token =
               use_block_token_pipeline
                   ? current_block_tokens.GetValue(score_index)
-                  : use_p11_token_staging
+              : use_p11_token_staging
                   ? staged_candidate_tokens.GetValue(local_idx)
                   : ReadCandidateToken(table_kind,
                                        begin + block_offset + score_index);
@@ -1669,22 +1816,42 @@ class RecConstrainedTopKKernel {
         attribution.stream_block_lse_us += elapsed_us;
       }
 
-      SortAndMergeBlock(block_scores,
-                        0,
-                        block_offset,
-                        actual_count,
-                        begin,
-                        degree,
-                        table_kind,
-                        use_block_token_pipeline,
-                        current_block_tokens,
-                        top_values,
-                        top_tokens,
-                        filled_topk_count,
-                        top_values_are_heap,
-                        attribution_mode,
-                        true,
-                        attribution);
+      if (use_pairwise_vector_merge) {
+        SortAndMergeBlockPairs(block_scores,
+                               actual_count,
+                               current_block_tokens,
+                               global_pairs,
+                               global_pair_count,
+                               attribution_mode,
+                               attribution);
+      } else {
+        SortAndMergeBlock(block_scores,
+                          0,
+                          block_offset,
+                          actual_count,
+                          begin,
+                          degree,
+                          table_kind,
+                          use_block_token_pipeline,
+                          current_block_tokens,
+                          top_values,
+                          top_tokens,
+                          filled_topk_count,
+                          top_values_are_heap,
+                          attribution_mode,
+                          true,
+                          attribution);
+      }
+    }
+    if (use_pairwise_vector_merge) {
+      ExtractGlobalPairs(global_pairs,
+                         global_pair_count,
+                         top_values,
+                         top_tokens,
+                         filled_topk_count,
+                         top_values_are_heap,
+                         attribution_mode,
+                         attribution);
     }
   }
 
@@ -1754,7 +1921,7 @@ class RecConstrainedTopKKernel {
     bool top_values_are_heap = false;
     const bool no_candidate_prune_needed = degree <= tiling_data_.top_k;
     const bool use_block_sort_topk = degree > tiling_data_.top_k &&
-        degree >= kRecConstrainedTopKSortThreshold;
+                                     degree >= kRecConstrainedTopKSortThreshold;
     const bool use_streaming_mode =
         tiling_data_.streaming_mode != 0 && use_block_sort_topk;
 
@@ -1782,127 +1949,127 @@ class RecConstrainedTopKKernel {
                              attribution);
     } else {
       used_contiguous_scan =
-        use_block_sort_topk &&
-        TryLoadContiguousCandidateScores(row,
-                                         begin,
-                                         degree,
-                                         table_kind,
-                                         temperature,
-                                         candidate_logits,
-                                         cached_block_offset,
-                                         cached_logit_bf16,
-                                         cached_logit_float,
-                                         max_value,
-                                         attribution_mode,
-                                         attribution);
-    if (!used_contiguous_scan) {
-      const bool use_p11_token_staging =
-          (tiling_data_.p11_mode == 2 || tiling_data_.p11_mode == 4) &&
-          degree >= kRecConstrainedTopKTokenStagingThreshold;
-      AscendC::LocalTensor<int32_t> staged_candidate_tokens =
-          candidate_token_chunk_buf_.Get<int32_t>(
-              kRecConstrainedTopKCandidateTokenChunkElements);
-      const int32_t scan_step =
-          use_p11_token_staging
-              ? kRecConstrainedTopKCandidateTokenChunkElements
-              : 1;
-      for (int32_t chunk_begin = 0; chunk_begin < degree;
-           chunk_begin += scan_step) {
-        const int32_t remaining = degree - chunk_begin;
-        const int32_t copy_count =
-            remaining < scan_step ? remaining : scan_step;
-        if (use_p11_token_staging) {
-          const int64_t token_copy_start_us =
-              attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
-          CopyCandidateTokenChunk(staged_candidate_tokens,
-                                  table_kind,
-                                  begin + chunk_begin,
-                                  copy_count);
-          WaitMte2ToScalar();
-          if (attribution_mode) {
-            attribution.candidate_token_copy_us +=
-                RecConstrainedTopKTimestampUs() - token_copy_start_us;
-          }
-        }
-        for (int32_t local_idx = 0; local_idx < copy_count; ++local_idx) {
-          const int32_t idx = chunk_begin + local_idx;
-          int64_t sub_stage_start_us =
-              attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
-          const int32_t token =
-              use_p11_token_staging
-                  ? staged_candidate_tokens.GetValue(local_idx)
-                  : ReadCandidateToken(table_kind, begin + idx);
-          if (attribution_mode) {
-            const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
-            if (use_p11_token_staging) {
-              attribution.candidate_token_ub_read_us +=
-                  sub_stage_end_us - sub_stage_start_us;
-            } else {
-              attribution.candidate_token_read_us +=
-                  sub_stage_end_us - sub_stage_start_us;
-            }
-            sub_stage_start_us = sub_stage_end_us;
-          }
-          if (token < 0 || token >= tiling_data_.vocab_size) {
-            candidate_logits.SetValue(idx, kRecConstrainedTopKInvalidLogProb);
+          use_block_sort_topk &&
+          TryLoadContiguousCandidateScores(row,
+                                           begin,
+                                           degree,
+                                           table_kind,
+                                           temperature,
+                                           candidate_logits,
+                                           cached_block_offset,
+                                           cached_logit_bf16,
+                                           cached_logit_float,
+                                           max_value,
+                                           attribution_mode,
+                                           attribution);
+      if (!used_contiguous_scan) {
+        const bool use_p11_token_staging =
+            (tiling_data_.p11_mode == 2 || tiling_data_.p11_mode == 4) &&
+            degree >= kRecConstrainedTopKTokenStagingThreshold;
+        AscendC::LocalTensor<int32_t> staged_candidate_tokens =
+            candidate_token_chunk_buf_.Get<int32_t>(
+                kRecConstrainedTopKCandidateTokenChunkElements);
+        const int32_t scan_step =
+            use_p11_token_staging
+                ? kRecConstrainedTopKCandidateTokenChunkElements
+                : 1;
+        for (int32_t chunk_begin = 0; chunk_begin < degree;
+             chunk_begin += scan_step) {
+          const int32_t remaining = degree - chunk_begin;
+          const int32_t copy_count =
+              remaining < scan_step ? remaining : scan_step;
+          if (use_p11_token_staging) {
+            const int64_t token_copy_start_us =
+                attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+            CopyCandidateTokenChunk(staged_candidate_tokens,
+                                    table_kind,
+                                    begin + chunk_begin,
+                                    copy_count);
+            WaitMte2ToScalar();
             if (attribution_mode) {
+              attribution.candidate_token_copy_us +=
+                  RecConstrainedTopKTimestampUs() - token_copy_start_us;
+            }
+          }
+          for (int32_t local_idx = 0; local_idx < copy_count; ++local_idx) {
+            const int32_t idx = chunk_begin + local_idx;
+            int64_t sub_stage_start_us =
+                attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+            const int32_t token =
+                use_p11_token_staging
+                    ? staged_candidate_tokens.GetValue(local_idx)
+                    : ReadCandidateToken(table_kind, begin + idx);
+            if (attribution_mode) {
+              const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
+              if (use_p11_token_staging) {
+                attribution.candidate_token_ub_read_us +=
+                    sub_stage_end_us - sub_stage_start_us;
+              } else {
+                attribution.candidate_token_read_us +=
+                    sub_stage_end_us - sub_stage_start_us;
+              }
+              sub_stage_start_us = sub_stage_end_us;
+            }
+            if (token < 0 || token >= tiling_data_.vocab_size) {
+              candidate_logits.SetValue(idx, kRecConstrainedTopKInvalidLogProb);
+              if (attribution_mode) {
                 attribution.score_store_us +=
                     RecConstrainedTopKTimestampUs() - sub_stage_start_us;
+              }
+              continue;
             }
-            continue;
-          }
-          const float logit = ReadLogit(row,
-                                        token,
-                                        cached_block_offset,
-                                        cached_logit_bf16,
-                                        cached_logit_float);
-          if (attribution_mode) {
-            const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
+            const float logit = ReadLogit(row,
+                                          token,
+                                          cached_block_offset,
+                                          cached_logit_bf16,
+                                          cached_logit_float);
+            if (attribution_mode) {
+              const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
               attribution.logit_read_us +=
                   sub_stage_end_us - sub_stage_start_us;
-            sub_stage_start_us = sub_stage_end_us;
-          }
-          const float value = logit / temperature;
-          candidate_logits.SetValue(idx, value);
-          if (value > max_value) {
-            max_value = value;
-          }
-          if (attribution_mode) {
-            const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
+              sub_stage_start_us = sub_stage_end_us;
+            }
+            const float value = logit / temperature;
+            candidate_logits.SetValue(idx, value);
+            if (value > max_value) {
+              max_value = value;
+            }
+            if (attribution_mode) {
+              const int64_t sub_stage_end_us = RecConstrainedTopKTimestampUs();
               attribution.score_store_us +=
                   sub_stage_end_us - sub_stage_start_us;
-            sub_stage_start_us = sub_stage_end_us;
-          }
-          if (use_block_sort_topk) {
-            continue;
-          }
-          if (no_candidate_prune_needed) {
-            top_values[filled_topk_count] = value;
-            top_tokens[filled_topk_count] = token;
-            ++filled_topk_count;
-          } else if (filled_topk_count < tiling_data_.top_k) {
-            top_values[filled_topk_count] = value;
-            top_tokens[filled_topk_count] = token;
-            ++filled_topk_count;
-            if (filled_topk_count == tiling_data_.top_k) {
-              BuildMinHeap(top_values, top_tokens, filled_topk_count);
-              top_values_are_heap = true;
+              sub_stage_start_us = sub_stage_end_us;
             }
-          } else {
-            ReplaceMinHeapRoot(
-                value, token, top_values, top_tokens, filled_topk_count);
-          }
-          if (attribution_mode) {
-            attribution.scan_topk_update_us +=
-                RecConstrainedTopKTimestampUs() - sub_stage_start_us;
+            if (use_block_sort_topk) {
+              continue;
+            }
+            if (no_candidate_prune_needed) {
+              top_values[filled_topk_count] = value;
+              top_tokens[filled_topk_count] = token;
+              ++filled_topk_count;
+            } else if (filled_topk_count < tiling_data_.top_k) {
+              top_values[filled_topk_count] = value;
+              top_tokens[filled_topk_count] = token;
+              ++filled_topk_count;
+              if (filled_topk_count == tiling_data_.top_k) {
+                BuildMinHeap(top_values, top_tokens, filled_topk_count);
+                top_values_are_heap = true;
+              }
+            } else {
+              ReplaceMinHeapRoot(
+                  value, token, top_values, top_tokens, filled_topk_count);
+            }
+            if (attribution_mode) {
+              attribution.scan_topk_update_us +=
+                  RecConstrainedTopKTimestampUs() - sub_stage_start_us;
+            }
           }
         }
       }
-    }
-    if (attribution_mode) {
-      attribution.candidate_scan_us =
-          RecConstrainedTopKTimestampUs() - stage_start_us;
-    }
+      if (attribution_mode) {
+        attribution.candidate_scan_us =
+            RecConstrainedTopKTimestampUs() - stage_start_us;
+      }
     }
 
     if (max_value < -3.0e38f) {
@@ -1924,12 +2091,12 @@ class RecConstrainedTopKKernel {
     }
 
     if (!use_streaming_mode) {
-    stage_start_us = attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
+      stage_start_us = attribution_mode ? RecConstrainedTopKTimestampUs() : 0;
       sum_exp = SumExpFromCandidateLogits(candidate_logits, degree, max_value);
-    if (attribution_mode) {
-      attribution.logsumexp_us =
-          RecConstrainedTopKTimestampUs() - stage_start_us;
-    }
+      if (attribution_mode) {
+        attribution.logsumexp_us =
+            RecConstrainedTopKTimestampUs() - stage_start_us;
+      }
     }
 
     if (sum_exp <= 0.0f) {
@@ -2037,6 +2204,7 @@ class RecConstrainedTopKKernel {
   AscendC::TBuf<AscendC::TPosition::VECCALC> block_token_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> candidate_logit_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> sort_pair_buf_;
+  AscendC::TBuf<AscendC::TPosition::VECCALC> global_pair_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> sort_index_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> sort_tmp_buf_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> output_token_buf_;

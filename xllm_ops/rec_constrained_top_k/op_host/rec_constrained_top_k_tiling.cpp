@@ -142,7 +142,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   const int32_t used_core_num =
       row_write_aligned
           ? std::max(1, std::min(requested_core_num, max_core_num))
-                        : 1;
+          : 1;
   tiling.set_used_core_num(used_core_num);
   tiling.set_debug_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", 0));
   tiling.set_p11_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", 0));
@@ -158,6 +158,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
   tiling.set_load_bf16_mode(load_bf16_mode);
   tiling.set_streaming_mode(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", 0));
+  tiling.set_p19_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_P19_MODE", 0));
 
   context->SetBlockDim(used_core_num);
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),

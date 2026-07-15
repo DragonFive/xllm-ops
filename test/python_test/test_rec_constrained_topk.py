@@ -419,6 +419,70 @@ def test_rec_constrained_topk_streaming_blocksort_bf16_npu(
             )
 
 
+def test_rec_constrained_topk_p19_pair_merge_noncontiguous_tokens_npu(monkeypatch):
+    try:
+        device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
+        torch_npu.npu.set_device(device_id)
+    except Exception as exc:
+        pytest.skip(f"NPU device not available: {exc}")
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", "2")
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", "4")
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P19_MODE", "1")
+    top_k = 384
+    candidate_count = 2603
+    vocab_size = 4096
+    tables = _build_wide_step0_tables(vocab_size, candidate_count)
+    torch.manual_seed(20260719)
+    tables["first_token_ids"] = torch.randperm(vocab_size, dtype=torch.int64)[
+        :candidate_count
+    ].to(torch.int32)
+    logits = torch.randn([1, vocab_size], dtype=torch.bfloat16)
+    sequence_group = torch.zeros([1, 3], dtype=torch.int32)
+    temperatures = torch.tensor([0.73], dtype=torch.float32)
+    expected_tokens, expected_logprobs = _reference_topk(
+        logits.float(), sequence_group, temperatures, 0, top_k, tables
+    )
+    npu_tables = _to_npu_tables(tables)
+    out_tokens, out_logprobs = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+
+    actual_tokens = out_tokens.cpu()
+    actual_logprobs = out_logprobs.cpu()
+    assert torch.allclose(
+        torch.sort(actual_logprobs, dim=1, descending=True).values,
+        torch.sort(expected_logprobs, dim=1, descending=True).values,
+        atol=1e-4,
+        rtol=1e-4,
+    )
+    allowed = tables["first_token_ids"].to(torch.long)
+    candidate_logits = logits.float()[0, allowed] / temperatures[0]
+    candidate_logprobs = torch.log_softmax(candidate_logits, dim=0)
+    expected_by_token = {
+        int(token.item()): float(logprob.item())
+        for token, logprob in zip(allowed, candidate_logprobs)
+    }
+    for idx in range(top_k):
+        token = int(actual_tokens[0, idx].item())
+        assert token in expected_by_token
+        assert actual_logprobs[0, idx].item() == pytest.approx(
+            expected_by_token[token], abs=1e-4
+        )
+
+
 def test_rec_constrained_topk_streaming_single_block_bf16_npu(monkeypatch):
     try:
         device_id = int(os.getenv("NPU_DEVICE_ID", os.getenv("ASCEND_DEVICE_ID", "0")))
