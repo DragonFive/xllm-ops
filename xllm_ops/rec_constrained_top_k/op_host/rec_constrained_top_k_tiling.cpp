@@ -50,6 +50,10 @@ enum OutputIndex {
 constexpr int64_t kDefaultSequenceStride = 3;
 constexpr int32_t kOutputElementBytes = 4;
 constexpr int32_t kGmBlockBytes = 32;
+constexpr int32_t kDefaultLoadBf16Mode = 4;
+constexpr int32_t kDefaultStreamingMode = 2;
+constexpr int32_t kDefaultP11Mode = 4;
+constexpr int32_t kDefaultP19Mode = 1;
 
 int32_t get_env_int(const char* name, int32_t default_value) {
   const char* value = std::getenv(name);
@@ -145,20 +149,22 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
           : 1;
   tiling.set_used_core_num(used_core_num);
   tiling.set_debug_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_DEBUG_MODE", 0));
-  tiling.set_p11_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", 0));
+  tiling.set_p11_mode(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", kDefaultP11Mode));
   tiling.set_enable_contiguous_scan(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_CONTIGUOUS_SCAN", 0));
   tiling.set_enable_vector_final_sort(
       get_env_int("XLLM_REC_CONSTRAINED_TOPK_VECTOR_FINAL_SORT", 0));
   int32_t load_bf16_mode =
-      get_env_int("XLLM_REC_CONSTRAINED_TOPK_LOAD_MODE", 0);
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_LOAD_MODE", kDefaultLoadBf16Mode);
   if (load_bf16_mode == 4 && top_k != 384) {
     load_bf16_mode = 0;
   }
   tiling.set_load_bf16_mode(load_bf16_mode);
-  tiling.set_streaming_mode(
-      get_env_int("XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", 0));
-  tiling.set_p19_mode(get_env_int("XLLM_REC_CONSTRAINED_TOPK_P19_MODE", 0));
+  tiling.set_streaming_mode(get_env_int(
+      "XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", kDefaultStreamingMode));
+  tiling.set_p19_mode(
+      get_env_int("XLLM_REC_CONSTRAINED_TOPK_P19_MODE", kDefaultP19Mode));
 
   context->SetBlockDim(used_core_num);
   tiling.SaveToBuffer(context->GetRawTilingData()->GetData(),

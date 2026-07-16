@@ -1,15 +1,17 @@
 # RecConstrainedTopK
 
-This directory contains the opt-in fused OneRec constrained top-k custom op.
+This directory contains the fused OneRec constrained top-k custom op.
 
-The xLLM runtime wrapper is gated by
-`XLLM_ENABLE_ONEREC_FUSED_CONSTRAINED_TOPK=1` and falls back to the composite
-selector when the custom op symbols are unavailable or execution fails.
+The xLLM runtime wrapper attempts the fused path by default and falls back to
+the composite selector when the custom op symbols are unavailable, the shape
+is unsupported, or execution fails. Set
+`XLLM_ENABLE_ONEREC_FUSED_CONSTRAINED_TOPK=0` for an emergency composite-path
+rollback.
 
-The first implementation prioritizes operator-oracle equivalence and runtime
-fallback safety over making the fused selector the default path. Do not make it
-default until the operator oracle, debug fused-vs-composite comparison, HTTP
-benchmark, and msprof gates pass.
+The retained production defaults are load mode4, streaming mode2, P11 mode4,
+and P19 mode1. Their existing environment variables remain numeric overrides;
+setting them to `0` selects the corresponding baseline behavior. Shape guards
+still decide whether each optimized sub-path applies to a particular row.
 
 Supported contract:
 

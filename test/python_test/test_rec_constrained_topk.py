@@ -889,10 +889,45 @@ def test_rec_constrained_topk_stage_attribution_debug_npu(monkeypatch):
         diag_tokens[:, 9],
         torch.full([rows], tables["first_token_ids"].numel(), dtype=torch.int32),
     )
-    assert torch.equal(diag_tokens[:, 16], torch.zeros([rows], dtype=torch.int32))
-    assert torch.equal(diag_tokens[:, 17], torch.zeros([rows], dtype=torch.int32))
+    assert torch.equal(
+        diag_tokens[:, 15], torch.full([rows], 4, dtype=torch.int32)
+    )
+    assert torch.equal(diag_tokens[:, 16], torch.ones([rows], dtype=torch.int32))
+    assert torch.equal(
+        diag_tokens[:, 17], torch.full([rows], 2, dtype=torch.int32)
+    )
     assert torch.equal(diag_timings[:, 10], torch.zeros([rows], dtype=torch.float32))
     assert torch.all(diag_timings[:, :29] >= 0)
+
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P11_MODE", "0")
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_P19_MODE", "0")
+    monkeypatch.setenv("XLLM_REC_CONSTRAINED_TOPK_STREAMING_MODE", "0")
+    rollback_top_k = top_k - 1
+    rollback_tokens, _ = custom_ops.rec_constrained_topk_npu(
+        logits.npu(),
+        sequence_group.npu(),
+        npu_tables["first_token_ids"],
+        npu_tables["prefix1_offsets"],
+        npu_tables["prefix1_values"],
+        npu_tables["prefix1_pair_keys"],
+        npu_tables["prefix2_value_offsets"],
+        npu_tables["prefix2_values"],
+        temperatures.npu(),
+        0,
+        rollback_top_k,
+        tables["max_prefix1_degree"],
+        tables["max_prefix2_degree"],
+    )
+    rollback_diag_tokens = rollback_tokens.cpu()
+    assert torch.equal(
+        rollback_diag_tokens[:, 15], torch.zeros([rows], dtype=torch.int32)
+    )
+    assert torch.equal(
+        rollback_diag_tokens[:, 16], torch.zeros([rows], dtype=torch.int32)
+    )
+    assert torch.equal(
+        rollback_diag_tokens[:, 17], torch.zeros([rows], dtype=torch.int32)
+    )
 
 
 @pytest.mark.parametrize("streaming_mode", [1, 2])
@@ -941,7 +976,13 @@ def test_rec_constrained_topk_streaming_stage_attribution_npu(
     diag_timings = out_logprobs.cpu()
     assert diag_tokens[0, 6].item() == 1
     assert diag_tokens[0, 17].item() == streaming_mode
-    assert torch.all(diag_timings[:, 25:29] > 0)
+    assert torch.all(diag_timings[:, 25:27] > 0)
+    assert torch.all(diag_timings[:, 27:29] >= 0)
+    if streaming_mode == 1:
+        assert torch.all(diag_timings[:, 28] > 0)
+    else:
+        assert diag_tokens[0, 16].item() == 1
+        assert torch.all(diag_timings[:, 23] >= 0)
     if streaming_mode == 2:
         assert torch.all(diag_timings[:, 29:31] >= 0)
     else:
