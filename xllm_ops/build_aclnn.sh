@@ -130,6 +130,7 @@ elif [[ "$SOC_VERSION" =~ ^(ascend)?910b ]]; then
         ### JD's in-house operators ####
         "beam_search_group"
         "x_attention"
+        "cross_attention"
         "cache_unshared_kv"
         "causal_conv1d"
         "convert_kv_cache_format"
@@ -239,6 +240,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
          ### JD's in-house operators ####
         "beam_search_group"
         "x_attention"
+        "cross_attention"
         "cache_unshared_kv"
         "causal_conv1d"
         "convert_kv_cache_format"
