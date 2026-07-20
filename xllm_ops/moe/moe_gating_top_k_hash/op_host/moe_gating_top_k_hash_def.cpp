@@ -138,7 +138,9 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "moe_gating_top_k_hash");
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
         this->AICore().AddConfig("ascend950", regbaseCfg);
+#endif
     }
 };
 

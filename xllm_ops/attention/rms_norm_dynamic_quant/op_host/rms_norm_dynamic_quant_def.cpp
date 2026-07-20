@@ -79,7 +79,9 @@ public:
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
         this->AICore().AddConfig("ascend950");
+#endif
     }
 };
 OP_ADD(RmsNormDynamicQuant);

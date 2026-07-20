@@ -49,7 +49,9 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "inplace_partial_rotary_mul");
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
         this->AICore().AddConfig("ascend950", regbaseCfg);
+#endif
         this->AICore().AddConfig("ascend910b", regbaseCfg);
         this->AICore().AddConfig("ascend910_93", regbaseCfg);
     }

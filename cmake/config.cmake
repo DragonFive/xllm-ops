@@ -105,6 +105,26 @@ endif()
 #   CMake 构建过程: 1) 配置阶段(Configure); 2) 构建阶段(Build); 3) 安装阶段(Install);
 ########################################################################################################################
 if (BUILD_OPEN_PROJECT)
+    # CANN 8.5 cannot parse the A5 product name; keep A5 registration for CANN 9+.
+    set(XLLM_OPS_CANN_MAJOR_VERSION 0)
+    foreach(_cann_version_file
+            "${ASCEND_CANN_PACKAGE_PATH}/compiler/version.info"
+            "${ASCEND_CANN_PACKAGE_PATH}/version.info"
+            "${ASCEND_CANN_PACKAGE_PATH}/toolkit/version.info")
+        if (XLLM_OPS_CANN_MAJOR_VERSION EQUAL 0 AND EXISTS "${_cann_version_file}")
+            file(STRINGS "${_cann_version_file}" _cann_version_line REGEX "^Version=" LIMIT_COUNT 1)
+            if (_cann_version_line)
+                string(REGEX REPLACE "^Version=([0-9]+).*" "\\1" _cann_major "${_cann_version_line}")
+                if (_cann_major MATCHES "^[0-9]+$")
+                    set(XLLM_OPS_CANN_MAJOR_VERSION "${_cann_major}")
+                endif()
+            endif()
+        endif()
+    endforeach()
+    if (XLLM_OPS_CANN_MAJOR_VERSION GREATER_EQUAL 9)
+        add_compile_definitions(XLLM_OPS_ENABLE_ASCEND950)
+    endif()
+
     # 构建阶段(Build)
     #   构建类型
     #       CMake中的Generator(生成器)是用于生成本地/本机构建系统的工具。一般分为两种:

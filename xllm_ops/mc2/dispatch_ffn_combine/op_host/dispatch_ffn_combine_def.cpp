@@ -91,7 +91,9 @@ class DispatchFFNCombine : public OpDef {
         .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel");
     this->AICore().AddConfig("ascend910_93", aicore_config);
     this->AICore().AddConfig("ascend910b", aicore_config);
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
     this->AICore().AddConfig("ascend950", aicore_config);
+#endif
     this->MC2().HcclGroup("group");
   }
 };
