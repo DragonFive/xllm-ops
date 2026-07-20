@@ -317,11 +317,13 @@ ge::graphStatus TilingForHcPreInvRms(gert::TilingContext *context)
                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto socVersion = ascendcPlatform.GetSocVersion();
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
     if (socVersion == platform_ascendc::SocVersion::ASCEND950) {
         OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
         HcPreInvRmsRegbase::HcPreInvRmsTilingRegbase hcPreInvRmsTilingRegbase(context);
         return hcPreInvRmsTilingRegbase.DoOpTiling();
     }
+#endif
 
     auto xShapePtr = context->GetInputShape(0);
     if (xShapePtr == nullptr) {

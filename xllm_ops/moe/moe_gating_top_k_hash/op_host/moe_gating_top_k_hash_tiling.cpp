@@ -618,11 +618,13 @@ ge::graphStatus TilingForMoeGatingTopKHash(gert::TilingContext *context)
                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto socVersion = ascendcPlatform.GetSocVersion();
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
     if (socVersion == platform_ascendc::SocVersion::ASCEND950) {
         OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
           MoeGatingTopKHashRegBase::MoeGatingTopKHashTilingRegbase moeGatingTopKTilingRegbase(context);
           return moeGatingTopKTilingRegbase.DoOpTiling();
     }
+#endif
 
     MoeGatingTopKHashTilingBase moeGatingTopKTilingBase(context);
     return moeGatingTopKTilingBase.DoOpTiling();

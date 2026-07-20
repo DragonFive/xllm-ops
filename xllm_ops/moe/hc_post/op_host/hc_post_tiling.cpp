@@ -210,11 +210,13 @@ ge::graphStatus Tiling4HcPost(gert::TilingContext* context)
                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto socVersion = ascendcPlatform.GetSocVersion();
+#if defined(XLLM_OPS_ENABLE_ASCEND950)
     if (socVersion == platform_ascendc::SocVersion::ASCEND950) {
         OPS_LOG_I(context, "Using arch35 tiling for ASCEND950");
         HcPostTilingRegbase tiling(context);
         return tiling.RunTilingRegbase();
     }
+#endif
     HcPostTiling tiling(context);
     return tiling.RunTiling();
 }
