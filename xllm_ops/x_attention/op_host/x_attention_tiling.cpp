@@ -144,7 +144,7 @@ ge::graphStatus TilingXAttentionFunc::ParseInputShapeAndAttrs()
 void TilingXAttentionFunc::BalanceAicore()
 {
   // Support dynamic calculation based on the amount of computation in the future.
-  sharedBlockDim = 12;
+  sharedBlockDim = cubeCoreNum / 2;
   unsharedBlockDim = cubeCoreNum - sharedBlockDim;
   return;
 }
