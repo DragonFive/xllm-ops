@@ -217,6 +217,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
+	"sparse_flash_attention"
         "moe_init_routing_custom"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
