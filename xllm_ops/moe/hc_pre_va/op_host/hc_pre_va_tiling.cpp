@@ -42,6 +42,7 @@ constexpr int64_t BLOCK_SIZE = 32;
 constexpr int64_t REPEAT_SIZE = 256;
 constexpr int64_t UB_RESEVED_SIZE = 8192;
 constexpr int64_t DOUBLE_BUFFER = 2;
+constexpr int64_t MAX_VECTOR_REPEAT = 255;
 constexpr uint64_t M_L1_MAX_SIZE = 256;
 constexpr uint64_t K_MULIT_CORE_SPLIT_BASE_SIZE = 256;
 constexpr uint64_t A_L1_SIZE = 128 * 256;
@@ -72,7 +73,6 @@ ge::graphStatus HcPreVaTiling::GetPlatformInfo() {
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB,
                                    ubSizePlatForm);
     ubSize_ = ubSizePlatForm;
-    socVersion_ = ascendcPlatform.GetSocVersion();
   }
   OPS_ERR_IF(
       aivCoreNum_ == 0 || aicCoreNum_ == 0 || ubSize_ == 0,
@@ -299,9 +299,12 @@ ge::graphStatus HcPreVaTiling::CalcMKSplitCoreMembasePart2Tiling() {
     tailDFactor_ = d_ % dFactor_ == 0 ? dFactor_ : d_ % dFactor_;
   }
 
+  // Softmax reduces hcMult rows per token; vector repeats are limited to 255.
+  const int64_t maxRowFactor =
+      std::min(rowOfFormerBlock_, MAX_VECTOR_REPEAT / hcMult_);
   // d全载,尝试搬入更多的bs
   if (dFactor_ == d_) {
-    while (rowFactor_ <= rowOfFormerBlock_) {
+    while (rowFactor_ <= maxRowFactor) {
       mix0OriginSize =
           kBlockNum * rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
       mix1OriginSize =
@@ -340,7 +343,7 @@ ge::graphStatus HcPreVaTiling::CalcMKSplitCoreMembasePart2Tiling() {
       }
       rowFactor_ = rowFactor_ + 1;
     }
-    rowFactor_ = rowFactor_ > rowOfFormerBlock_ ? rowFactor_ - 1 : rowFactor_;
+    rowFactor_ = rowFactor_ > maxRowFactor ? rowFactor_ - 1 : rowFactor_;
   }
   rowLoopOfFormerBlock_ = CeilDiv(rowOfFormerBlock_, rowFactor_);
   rowLoopOfTailBlock_ = CeilDiv(rowOfTailBlock_, rowFactor_);

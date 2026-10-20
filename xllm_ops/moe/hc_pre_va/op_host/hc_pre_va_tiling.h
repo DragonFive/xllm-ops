@@ -134,8 +134,6 @@ class HcPreVaTiling {
   int64_t iterTimes_ = 0;
   double hcEps_ = 0.0;
   double normEps_ = 0.0;
-  platform_ascendc::SocVersion socVersion_ =
-      platform_ascendc::SocVersion::ASCEND910B;
 };
 
 }  // namespace optiling

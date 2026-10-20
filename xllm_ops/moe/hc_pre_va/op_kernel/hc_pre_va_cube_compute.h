@@ -47,11 +47,11 @@ struct MmParams {
   bool isLastK;
   bool isFirstK;
 };
-#define HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM template <bool enableSquareSum>
+#define HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM template <bool enableSquareSum>
 
-#define HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS HcCubeCompute<enableSquareSum>
+#define HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS HcCubeCompute<enableSquareSum>
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
 class HcCubeCompute {
  public:
   __aicore__ inline HcCubeCompute(){};
@@ -166,8 +166,8 @@ class HcCubeCompute {
   uint64_t n_ = 0;
 };
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Init(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::Init(
     const GlobalTensor<float>& xGm,
     const GlobalTensor<float>& fnGm,
     TPipe* tpipe) {
@@ -204,8 +204,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Init(
   }
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInA1(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInA1(
     uint64_t kL1Size,
     const GlobalTensor<float>& aGlobal,
     const LocalTensor<float>& al1Local,
@@ -223,8 +223,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInA1(
   DataCopy(al1Local, aGlobal, nd2nzParams);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInB1(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInB1(
     uint64_t mGmOffset,
     uint64_t kGmOffset,
     uint64_t kL1Size,
@@ -244,8 +244,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInB1(
            nd2nzParams);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyOut(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::CopyOut(
     const AscendC::GlobalTensor<float>& workspaceGlobal,
     const AscendC::LocalTensor<float>& c1Local,
     uint64_t baseM,
@@ -272,8 +272,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyOut(
   AscendC::DataCopy(workspaceGlobal, c1Local, intriParams);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Fixp(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::Fixp(
     const AscendC::GlobalTensor<float>& workspaceGlobalA2,
     const AscendC::GlobalTensor<float>& workspaceGlobalAB,
     const MmParams& mmParams) {
@@ -294,21 +294,21 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Fixp(
       mmParams.nOutSize);  // ND M/N are 512B aligned.
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
 __aicore__ inline void
-HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::SetBL1Mte1ToMte2Flag() {
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::SetBL1Mte1ToMte2Flag() {
   SetFlag<HardEvent::MTE1_MTE2>(B_MTE1_MTE2_EVENT + l1bLoopIdx_ % L1_BUF_NUM);
   l1bLoopIdx_++;
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
 __aicore__ inline void
-HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::WaitBL1Mte1ToMte2Flag() {
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::WaitBL1Mte1ToMte2Flag() {
   WaitFlag<HardEvent::MTE1_MTE2>(B_MTE1_MTE2_EVENT + l1bLoopIdx_ % L1_BUF_NUM);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeDecode(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeDecode(
     const AscendC::GlobalTensor<float>& xGm,
     const AscendC::GlobalTensor<float>& workspaceGlobalA2,
     const AscendC::GlobalTensor<float>& workspaceGlobalAB,
@@ -412,8 +412,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeDecode(
   }
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::End() {
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::End() {
   for (int i = 0; i < L0A_BUF_NUM; i++) {
     WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + i);
     WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + i);
@@ -424,8 +424,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::End() {
   }
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0A(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0A(
     uint64_t kL1Offset,
     uint64_t kL0Size,
     uint64_t l1LoopIdx,
@@ -467,8 +467,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0A(
       loadData3DParams);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0B(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0B(
     uint64_t kL1Offset,
     uint64_t kL0Size,
     uint64_t l1LoopIdx,
@@ -492,8 +492,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadAToL0B(
   }
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadA2(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::MmadA2(
     uint64_t kGmOffset,
     uint64_t kL0Size,
     bool isLastK,
@@ -521,8 +521,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadA2(
   }
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadBToL0B(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::LoadBToL0B(
     uint64_t kL1Offset,
     uint64_t kL0Size,
     uint64_t l1LoopIdx,
@@ -541,8 +541,8 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::LoadBToL0B(
            l1ToL0bParams);
 }
 
-HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
-__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadAB(
+HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_VA_CUBE_COMPUTE_TEMPLATE_CLASS::MmadAB(
     uint64_t kGmOffset,
     uint64_t kL0Size,
     bool isLastK,

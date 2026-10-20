@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "acl/acl_rt.h"
 #include "pytorch_npu_helper.hpp"
+#include "../../xllm_ops/moe/hc_pre_va/hc_pre_va_torch_adpt.h"
 
 void select_unshared_kv_impl_npu(
     const at::Tensor& beam_index,
@@ -1270,80 +1271,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_sinkhorn_impl_npu(
   return std::make_tuple(y, post, comb_frag);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> hc_pre_va_impl_npu(
-    const at::Tensor& hidden,
-    const at::Tensor& hc_fn,
-    const at::Tensor& hc_scale,
-    const at::Tensor& hc_base,
-    const c10::optional<at::Tensor>& pre_mix,
-    int64_t hc_mult,
-    int64_t hc_sinkhorn_iters,
-    double norm_eps,
-    double hc_eps) {
-  TORCH_CHECK(hidden.device().type() == torch_npu::utils::get_npu_device_type(),
-              "hidden must be on an NPU");
-  TORCH_CHECK(hidden.dim() == 3 || hidden.dim() == 4,
-              "hidden must have rank 3 or 4");
-  TORCH_CHECK(hc_mult == 4 && hidden.size(-2) == hc_mult,
-              "hc_mult and hidden.size(-2) must equal 4");
-  TORCH_CHECK(hidden.numel() > 0 && hidden.scalar_type() == at::kBFloat16,
-              "hidden must be nonempty BF16");
-  TORCH_CHECK(hc_fn.dim() == 2 && hc_fn.size(0) == 24 &&
-                  hc_fn.size(1) == hc_mult * hidden.size(-1),
-              "hc_fn must have shape [24, 4 * hidden_size]");
-  TORCH_CHECK(hc_scale.dim() == 1 && hc_scale.size(0) == 3,
-              "hc_scale must have shape [3]");
-  TORCH_CHECK(hc_base.dim() == 1 && hc_base.size(0) == 24,
-              "hc_base must have shape [24]");
-  TORCH_CHECK(hc_sinkhorn_iters > 0 && std::isfinite(norm_eps) &&
-                  norm_eps > 0 && std::isfinite(hc_eps) && hc_eps > 0,
-              "iterations and finite epsilon values must be positive");
-  for (const at::Tensor& tensor : {hidden, hc_fn, hc_scale, hc_base}) {
-    TORCH_CHECK(tensor.device() == hidden.device() && tensor.is_contiguous(),
-                "all inputs must be contiguous on the same NPU");
-  }
-  for (const at::Tensor& tensor : {hc_fn, hc_scale, hc_base}) {
-    TORCH_CHECK(tensor.scalar_type() == at::kFloat,
-                "hc_fn, hc_scale and hc_base must be FP32");
-  }
-  std::vector<int64_t> batch_shape(hidden.sizes().begin(),
-                                   hidden.sizes().end() - 2);
-  std::vector<int64_t> output_shape = batch_shape;
-  output_shape.push_back(hidden.size(-1));
-  std::vector<int64_t> mix_shape = batch_shape;
-  mix_shape.push_back(hc_mult);
-  std::vector<int64_t> comb_shape = mix_shape;
-  comb_shape.push_back(hc_mult);
-  if (pre_mix.has_value()) {
-    TORCH_CHECK(pre_mix->sizes().vec() == mix_shape &&
-                    pre_mix->scalar_type() == at::kFloat &&
-                    pre_mix->device() == hidden.device() &&
-                    pre_mix->is_contiguous(),
-                "pre_mix must be contiguous FP32 with shape hidden.shape[:-1] "
-                "on the same NPU");
-  }
-  at::Tensor output = at::empty(output_shape, hidden.options());
-  at::Tensor post = at::empty(mix_shape, hidden.options().dtype(at::kFloat));
-  at::Tensor comb_frag =
-      at::empty(comb_shape, hidden.options().dtype(at::kFloat));
-  at::Tensor pre = at::empty(mix_shape, hidden.options().dtype(at::kFloat));
-  EXEC_NPU_CMD(aclnnHcPreVa,
-               hidden,
-               hc_fn,
-               hc_scale,
-               hc_base,
-               pre_mix,
-               hc_mult,
-               hc_sinkhorn_iters,
-               hc_eps,
-               norm_eps,
-               output,
-               post,
-               comb_frag,
-               pre);
-  return std::make_tuple(output, post, comb_frag, pre);
-}
-
 at::Tensor hc_pre_inv_rms_impl_npu(const at::Tensor& x, double epsilon) {
   // y = 1/sqrt(mean(x^2 over last two dims) + eps), output always fp32.
   // x: (b, s, hc, d) -> y: (b, s, 1)   or   x: (t, hc, d) -> y: (t, 1)
@@ -2428,7 +2355,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_init_routing_custom", &moe_init_routing_custom_impl_npu, "moe_init_routing_custom");
   m.def("moe_init_routing_v3", &moe_init_routing_v3_impl_npu, "moe_init_routing_v3");
   m.def("hc_pre_sinkhorn", &hc_pre_sinkhorn_impl_npu, "hc_pre_sinkhorn");
-  m.def("hc_pre_va", &hc_pre_va_impl_npu, "hc_pre_va");
+  m.def("hc_pre_va", &xllm_ops_hc_pre_va::hc_pre_va_impl_npu, "DSV4.1 hc_pre_va");
   m.def("pp_matmul_opt", &pp_matmul_opt_impl_npu, "pp_matmul_opt");
   m.def("moe_grouped_matmul", &moe_grouped_matmul_impl_npu, "moe_grouped_matmul");
   m.def("index_group_matmul", &index_group_matmul_impl_npu, "index_group_matmul");
